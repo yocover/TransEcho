@@ -1,4 +1,4 @@
-# TransEcho - macOS 实时同声传译
+# TransEcho - 实时同声传译
 
 <p align="center">
   <img src="src-tauri/icons/icon.png" width="128" height="128" alt="TransEcho Logo">
@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/platform-macOS%2014%2B-blue" alt="Platform">
+  <img src="https://img.shields.io/badge/platform-macOS%20|%20Windows-blue" alt="Platform">
   <img src="https://img.shields.io/badge/built%20with-Tauri%202-yellow" alt="Tauri">
   <img src="https://img.shields.io/badge/lang-Rust%20%2B%20Svelte-orange" alt="Stack">
   <img src="https://img.shields.io/github/license/wxkingstar/TransEcho" alt="License">
@@ -160,7 +160,7 @@ TransEcho/
 <details>
 <summary><b>支持 Windows / Linux 吗？</b></summary>
 
-目前仅支持 macOS 14+，因音频捕获依赖 ScreenCaptureKit。欢迎 PR 适配其他平台。
+支持 macOS 14+ 和 Windows 10+。macOS 使用 ScreenCaptureKit 捕获系统音频，Windows 使用 WASAPI Loopback。Linux 暂不支持，欢迎 PR。
 </details>
 
 ## 参与贡献

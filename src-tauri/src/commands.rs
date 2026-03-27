@@ -187,24 +187,39 @@ pub async fn start_interpretation(
     let audio_sender = audio_tx.clone();
     let pipeline_on_sub = on_subtitle.clone();
     tokio::spawn(async move {
-        let mut resampler = match AudioResampler::new(48000, 2) {
-            Ok(r) => r,
-            Err(e) => {
-                error!("Resampler error: {}", e);
-                // Notify frontend about the failure instead of silently dying
-                pipeline_on_sub
-                    .send(SubtitleEvent::Error {
-                        message: format!("音频重采样初始化失败: {}", e),
-                    })
-                    .ok();
-                return;
-            }
-        };
-
-        let chunk_size_interleaved = resampler.input_frames_next() * 2;
-        let mut audio_buffer: Vec<f32> = Vec::with_capacity(chunk_size_interleaved * 2);
+        // Defer resampler init until first frame so we can read actual sample_rate/channels
+        let mut resampler: Option<AudioResampler> = None;
+        let mut channels: u16;
+        let mut chunk_size_interleaved: usize = 0;
+        let mut audio_buffer: Vec<f32> = Vec::new();
 
         while let Some(frame) = audio_rx.recv().await {
+            // Initialize resampler on first frame using actual capture format
+            if resampler.is_none() {
+                channels = frame.channels;
+                match AudioResampler::new(frame.sample_rate, frame.channels) {
+                    Ok(r) => {
+                        chunk_size_interleaved = r.input_frames_next() * channels as usize;
+                        audio_buffer.reserve(chunk_size_interleaved * 2);
+                        info!(
+                            "Resampler initialized: {}Hz {}ch, chunk_size={}",
+                            frame.sample_rate, channels, chunk_size_interleaved
+                        );
+                        resampler = Some(r);
+                    }
+                    Err(e) => {
+                        error!("Resampler error: {}", e);
+                        pipeline_on_sub
+                            .send(SubtitleEvent::Error {
+                                message: format!("音频重采样初始化失败: {}", e),
+                            })
+                            .ok();
+                        return;
+                    }
+                }
+            }
+
+            let resampler = resampler.as_mut().unwrap();
             audio_buffer.extend_from_slice(&frame.samples);
 
             while audio_buffer.len() >= chunk_size_interleaved {
@@ -225,17 +240,17 @@ pub async fn start_interpretation(
             }
         }
 
-        // Flush residual audio samples that don't fill a complete chunk.
-        // The resampler's process() method pads short inputs to chunk_size,
-        // so the last partial chunk is sent rather than silently lost.
+        // Flush residual audio samples
         if !audio_buffer.is_empty() {
-            match resampler.process(&audio_buffer) {
-                Ok(pcm16) => {
-                    if !pcm16.is_empty() {
-                        let _ = audio_sender.send(pcm16).await;
+            if let Some(resampler) = resampler.as_mut() {
+                match resampler.process(&audio_buffer) {
+                    Ok(pcm16) => {
+                        if !pcm16.is_empty() {
+                            let _ = audio_sender.send(pcm16).await;
+                        }
                     }
+                    Err(e) => debug!("Flush resample: {}", e),
                 }
-                Err(e) => debug!("Flush resample: {}", e),
             }
         }
     });

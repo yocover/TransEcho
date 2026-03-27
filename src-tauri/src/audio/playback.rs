@@ -197,6 +197,7 @@ impl TtsHandle {
 }
 
 /// Lower system volume to the specified percentage (0-100)
+#[cfg(target_os = "macos")]
 pub fn set_system_volume(percent: u32) {
     let vol = percent.min(100);
     let _ = std::process::Command::new("osascript")
@@ -205,7 +206,13 @@ pub fn set_system_volume(percent: u32) {
     info!("System volume set to {}%", vol);
 }
 
+#[cfg(target_os = "windows")]
+pub fn set_system_volume(_percent: u32) {
+    // Windows volume control not implemented yet
+}
+
 /// Get current system volume (0-100)
+#[cfg(target_os = "macos")]
 pub fn get_system_volume() -> u32 {
     let output = std::process::Command::new("osascript")
         .args(["-e", "output volume of (get volume settings)"])
@@ -218,4 +225,9 @@ pub fn get_system_volume() -> u32 {
         }
         Err(_) => 50,
     }
+}
+
+#[cfg(target_os = "windows")]
+pub fn get_system_volume() -> u32 {
+    50 // Default fallback on Windows
 }
