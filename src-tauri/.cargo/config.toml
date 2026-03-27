@@ -1,0 +1,9 @@
+[env]
+# Required for screencapturekit crate's Swift bridge runtime
+DYLD_LIBRARY_PATH = "/usr/lib/swift"
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]
