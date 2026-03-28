@@ -1,22 +1,26 @@
 use prost::Message;
 use tracing::debug;
 
+use std::collections::HashMap;
+
 use super::proto::ast::{TranslateRequest, TranslateResponse};
 use super::proto::common::RequestMeta;
 use super::proto::event::Type as EventType;
-use super::proto::understanding::{Audio, User};
+use super::proto::understanding::{Audio, Corpus, User};
 
 /// Configuration for a translation session
 pub struct SessionConfig {
-    pub app_key: String,
-    pub access_key: String,
+    pub api_key: String,
     pub resource_id: String,
     pub connection_id: String,
     pub session_id: String,
     pub mode: String,           // "s2t" or "s2s"
     pub source_language: String, // "en", "ja", "zh", etc.
     pub target_language: String,
-    pub speaker_id: String,     // TTS voice, e.g. "zh_female_vv_uranus_bigtts"
+    pub speaker_id: String,     // TTS voice, empty string = clone input speaker
+    pub hot_words: Vec<String>,
+    pub glossary: HashMap<String, String>,
+    pub correct_words: String,  // JSON string: {"original":"replacement",...}
 }
 
 /// Encode a StartSession request
@@ -24,7 +28,7 @@ pub fn encode_start_session(config: &SessionConfig) -> Vec<u8> {
     let req = TranslateRequest {
         request_meta: Some(RequestMeta {
             endpoint: config.resource_id.clone(),
-            app_key: config.app_key.clone(),
+            app_key: String::new(),
             app_id: String::new(),
             resource_id: config.resource_id.clone(),
             connection_id: config.connection_id.clone(),
@@ -86,7 +90,7 @@ pub fn encode_start_session(config: &SessionConfig) -> Vec<u8> {
             source_language: config.source_language.clone(),
             target_language: config.target_language.clone(),
             speaker_id: config.speaker_id.clone(),
-            corpus: None,
+            corpus: build_corpus(config),
         }),
         denoise: Some(false),
     };
@@ -167,17 +171,73 @@ pub fn encode_finish_session(session_id: &str, connection_id: &str, sequence: i3
     req.encode_to_vec()
 }
 
+/// Build a Corpus from config if any corpus fields are set
+fn build_corpus(config: &SessionConfig) -> Option<Corpus> {
+    let has_corpus = !config.hot_words.is_empty()
+        || !config.glossary.is_empty()
+        || !config.correct_words.is_empty();
+
+    if !has_corpus {
+        return None;
+    }
+
+    Some(Corpus {
+        hot_words_list: config.hot_words.clone(),
+        glossary_list: config.glossary.clone(),
+        context: config.correct_words.clone(),
+        boosting_table_id: String::new(),
+        boosting_table_name: String::new(),
+        boosting_id: String::new(),
+        nnlm_id: String::new(),
+        correct_table_id: String::new(),
+        correct_table_name: String::new(),
+        punc_hot_words: String::new(),
+        show_match_hot_words: None,
+        show_all_match_hot_words: None,
+        show_effective_hot_words: None,
+    })
+}
+
+/// Encode an UpdateConfig request (event 201) for mid-session corpus updates
+pub fn encode_update_config(config: &SessionConfig, sequence: i32) -> Vec<u8> {
+    let req = TranslateRequest {
+        request_meta: Some(RequestMeta {
+            endpoint: String::new(),
+            app_key: String::new(),
+            app_id: String::new(),
+            resource_id: String::new(),
+            connection_id: config.connection_id.clone(),
+            session_id: config.session_id.clone(),
+            sequence,
+        }),
+        event: EventType::UpdateConfig as i32,
+        user: None,
+        source_audio: None,
+        target_audio: None,
+        request: Some(super::proto::ast::ReqParams {
+            mode: config.mode.clone(),
+            source_language: String::new(),
+            target_language: String::new(),
+            speaker_id: String::new(),
+            corpus: build_corpus(config),
+        }),
+        denoise: None,
+    };
+
+    req.encode_to_vec()
+}
+
 /// Decoded translation event from the server
 #[derive(Debug, Clone)]
 pub enum TranslationEvent {
     SessionStarted,
     SessionFinished,
     SessionFailed { message: String },
-    SourceSubtitle { text: String, is_final: bool, start_time: i32, end_time: i32 },
-    TranslationSubtitle { text: String, is_final: bool, start_time: i32, end_time: i32 },
+    SourceSubtitle { text: String, is_final: bool, start_time: i32, end_time: i32, spk_chg: bool },
+    TranslationSubtitle { text: String, is_final: bool, start_time: i32, end_time: i32, spk_chg: bool },
     TtsAudio { data: Vec<u8> },
     TtsSentenceEnd,
-    Usage { message: String },
+    Usage { input_audio_tokens: f64, output_text_tokens: f64, output_audio_tokens: f64, duration_ms: i64 },
     AudioMuted { duration_ms: i32 },
     Unknown { event: i32 },
 }
@@ -217,6 +277,7 @@ pub fn decode_response(data: &[u8]) -> Result<TranslationEvent, prost::DecodeErr
                 is_final: false,
                 start_time: resp.start_time,
                 end_time: resp.end_time,
+                spk_chg: resp.spk_chg,
             }
         }
         EventType::SourceSubtitleEnd => TranslationEvent::SourceSubtitle {
@@ -224,6 +285,7 @@ pub fn decode_response(data: &[u8]) -> Result<TranslationEvent, prost::DecodeErr
             is_final: true,
             start_time: resp.start_time,
             end_time: resp.end_time,
+            spk_chg: false,
         },
         EventType::TranslationSubtitleStart | EventType::TranslationSubtitleResponse => {
             TranslationEvent::TranslationSubtitle {
@@ -231,6 +293,7 @@ pub fn decode_response(data: &[u8]) -> Result<TranslationEvent, prost::DecodeErr
                 is_final: false,
                 start_time: resp.start_time,
                 end_time: resp.end_time,
+                spk_chg: resp.spk_chg,
             }
         }
         EventType::TranslationSubtitleEnd => TranslationEvent::TranslationSubtitle {
@@ -238,14 +301,31 @@ pub fn decode_response(data: &[u8]) -> Result<TranslationEvent, prost::DecodeErr
             is_final: true,
             start_time: resp.start_time,
             end_time: resp.end_time,
+            spk_chg: false,
         },
         EventType::TtsResponse => TranslationEvent::TtsAudio { data: resp.data },
         EventType::TtsSentenceEnd => TranslationEvent::TtsSentenceEnd,
-        EventType::UsageResponse => TranslationEvent::Usage {
-            message: resp
-                .response_meta
-                .map(|m| m.message)
-                .unwrap_or_default(),
+        EventType::UsageResponse => {
+            let billing = resp.response_meta.and_then(|m| m.billing);
+            let (mut input_audio, mut output_text, mut output_audio) = (0.0, 0.0, 0.0);
+            let mut duration = 0i64;
+            if let Some(ref b) = billing {
+                duration = b.duration_msec;
+                for item in &b.items {
+                    match item.unit.as_str() {
+                        "input_audio_tokens" => input_audio = item.quantity as f64,
+                        "output_text_tokens" => output_text = item.quantity as f64,
+                        "output_audio_tokens" => output_audio = item.quantity as f64,
+                        _ => {}
+                    }
+                }
+            }
+            TranslationEvent::Usage {
+                input_audio_tokens: input_audio,
+                output_text_tokens: output_text,
+                output_audio_tokens: output_audio,
+                duration_ms: duration,
+            }
         },
         EventType::AudioMuted => TranslationEvent::AudioMuted {
             duration_ms: resp.muted_duration_ms,
@@ -261,13 +341,12 @@ pub fn decode_response(data: &[u8]) -> Result<TranslationEvent, prost::DecodeErr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use super::super::proto::common::ResponseMeta;
 
-    #[test]
-    fn test_encode_start_session() {
-        let config = SessionConfig {
-            app_key: "test-key".to_string(),
-            access_key: "test-access".to_string(),
+    fn test_config() -> SessionConfig {
+        SessionConfig {
+            api_key: "test-key".to_string(),
             resource_id: "volc.service_type.10053".to_string(),
             connection_id: "conn-1".to_string(),
             session_id: "sess-1".to_string(),
@@ -275,7 +354,15 @@ mod tests {
             source_language: "en".to_string(),
             target_language: "zh".to_string(),
             speaker_id: String::new(),
-        };
+            hot_words: vec![],
+            glossary: HashMap::new(),
+            correct_words: String::new(),
+        }
+    }
+
+    #[test]
+    fn test_encode_start_session() {
+        let config = test_config();
         let data = encode_start_session(&config);
         assert!(!data.is_empty());
 

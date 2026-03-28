@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,13 +20,15 @@ use crate::transport::codec::{SessionConfig, TranslationEvent};
 #[serde(tag = "type")]
 pub enum SubtitleEvent {
     #[serde(rename = "source")]
-    Source { text: String, is_final: bool },
+    Source { text: String, is_final: bool, spk_chg: bool },
     #[serde(rename = "translation")]
-    Translation { text: String, is_final: bool },
+    Translation { text: String, is_final: bool, spk_chg: bool },
     #[serde(rename = "status")]
     Status { message: String },
     #[serde(rename = "error")]
     Error { message: String },
+    #[serde(rename = "usage")]
+    Usage { input_audio_tokens: f64, output_text_tokens: f64, output_audio_tokens: f64, duration_ms: i64 },
 }
 
 /// App state to track running session
@@ -66,12 +68,14 @@ impl Drop for CleanupGuard {
 pub async fn start_interpretation(
     app: AppHandle,
     on_subtitle: Channel<SubtitleEvent>,
-    app_key: String,
-    access_key: String,
+    api_key: String,
     source_language: String,
     target_language: String,
     enable_tts: bool,
     speaker_id: String,
+    hot_words: Vec<String>,
+    glossary: HashMap<String, String>,
+    correct_words: String,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
 
@@ -89,19 +93,20 @@ pub async fn start_interpretation(
     info!("Starting interpretation: mode={}", mode);
 
     // Save config params for potential reconnection during auto-pause
-    let cfg_app_key = app_key.clone();
-    let cfg_access_key = access_key.clone();
+    let cfg_api_key = api_key.clone();
     let cfg_source_lang = source_language.clone();
     let cfg_target_lang = target_language.clone();
     let cfg_speaker_id = speaker_id.clone();
     let cfg_mode = mode.to_string();
+    let cfg_hot_words = hot_words.clone();
+    let cfg_glossary = glossary.clone();
+    let cfg_correct_words = correct_words.clone();
 
     let session_id = uuid::Uuid::new_v4().to_string();
     let connection_id = uuid::Uuid::new_v4().to_string();
 
     let config = SessionConfig {
-        app_key,
-        access_key,
+        api_key,
         resource_id: "volc.service_type.10053".to_string(),
         connection_id,
         session_id,
@@ -109,6 +114,9 @@ pub async fn start_interpretation(
         source_language,
         target_language,
         speaker_id,
+        hot_words,
+        glossary,
+        correct_words,
     };
 
     // Connect to API
@@ -372,7 +380,7 @@ pub async fn start_interpretation(
                         }
                         event = erx.recv() => {
                             match event {
-                                Some(TranslationEvent::SourceSubtitle { text, is_final, .. }) => {
+                                Some(TranslationEvent::SourceSubtitle { text, is_final, spk_chg, .. }) => {
                                     if !text.is_empty() {
                                         if is_final {
                                             if is_duplicate(&text, &recent_sources) {
@@ -382,14 +390,14 @@ pub async fn start_interpretation(
                                                 if recent_sources.len() > DEDUP_WINDOW {
                                                     recent_sources.pop_front();
                                                 }
-                                                on_sub.send(SubtitleEvent::Source { text, is_final }).ok();
+                                                on_sub.send(SubtitleEvent::Source { text, is_final, spk_chg }).ok();
                                             }
                                         } else {
-                                            on_sub.send(SubtitleEvent::Source { text, is_final }).ok();
+                                            on_sub.send(SubtitleEvent::Source { text, is_final, spk_chg }).ok();
                                         }
                                     }
                                 }
-                                Some(TranslationEvent::TranslationSubtitle { text, is_final, .. }) => {
+                                Some(TranslationEvent::TranslationSubtitle { text, is_final, spk_chg, .. }) => {
                                     if !text.is_empty() {
                                         if is_final {
                                             if is_duplicate(&text, &recent_translations) {
@@ -399,12 +407,19 @@ pub async fn start_interpretation(
                                                 if recent_translations.len() > DEDUP_WINDOW {
                                                     recent_translations.pop_front();
                                                 }
-                                                on_sub.send(SubtitleEvent::Translation { text, is_final }).ok();
+                                                on_sub.send(SubtitleEvent::Translation { text, is_final, spk_chg }).ok();
                                             }
                                         } else {
-                                            on_sub.send(SubtitleEvent::Translation { text, is_final }).ok();
+                                            on_sub.send(SubtitleEvent::Translation { text, is_final, spk_chg }).ok();
                                         }
                                     }
+                                }
+                                Some(TranslationEvent::Usage { input_audio_tokens, output_text_tokens, output_audio_tokens, duration_ms }) => {
+                                    debug!("Usage: input_audio={}, output_text={}, output_audio={}, duration={}ms",
+                                        input_audio_tokens, output_text_tokens, output_audio_tokens, duration_ms);
+                                    on_sub.send(SubtitleEvent::Usage {
+                                        input_audio_tokens, output_text_tokens, output_audio_tokens, duration_ms,
+                                    }).ok();
                                 }
                                 Some(TranslationEvent::TtsAudio { data }) => {
                                     if let Some(ref player) = tts_player {
@@ -476,8 +491,7 @@ pub async fn start_interpretation(
                             }).ok();
 
                             let new_config = SessionConfig {
-                                app_key: cfg_app_key.clone(),
-                                access_key: cfg_access_key.clone(),
+                                api_key: cfg_api_key.clone(),
                                 resource_id: "volc.service_type.10053".to_string(),
                                 connection_id: uuid::Uuid::new_v4().to_string(),
                                 session_id: uuid::Uuid::new_v4().to_string(),
@@ -485,6 +499,9 @@ pub async fn start_interpretation(
                                 source_language: cfg_source_lang.clone(),
                                 target_language: cfg_target_lang.clone(),
                                 speaker_id: cfg_speaker_id.clone(),
+                                hot_words: cfg_hot_words.clone(),
+                                glossary: cfg_glossary.clone(),
+                                correct_words: cfg_correct_words.clone(),
                             };
 
                             let new_client = TranslationClient::new(new_config);

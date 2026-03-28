@@ -47,8 +47,7 @@ impl TranslationClient {
         // Build WebSocket request with auth headers
         let request = http::Request::builder()
             .uri(WS_URL)
-            .header("X-Api-App-Key", &self.config.app_key)
-            .header("X-Api-Access-Key", &self.config.access_key)
+            .header("X-Api-Key", &self.config.api_key)
             .header("X-Api-Resource-Id", &self.config.resource_id)
             .header("X-Api-Connect-Id", &self.config.connection_id)
             .header("Host", "openspeech.bytedance.com")
