@@ -85,7 +85,11 @@
   }
 
   async function start() {
+    const curSource = sourceLang;
+    const curTarget = targetLang;
     await loadSettings();
+    sourceLang = curSource;
+    targetLang = curTarget;
     if (!apiKey) {
       openSettings();
       return;
