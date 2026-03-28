@@ -51,7 +51,7 @@
 - macOS 14.0+
 - [Node.js](https://nodejs.org/) 18+
 - [Rust](https://www.rust-lang.org/tools/install) 1.70+
-- Volcengine AST API credentials ([apply here](https://console.volcengine.com/speech/service/10030))
+- Volcengine AST API Key ([apply here](https://console.volcengine.com/speech/new/experience/translate))
 
 ### Install & Run
 
@@ -62,7 +62,7 @@ npm install
 npm run tauri dev
 ```
 
-On first launch, enter your **APP ID** and **Access Token** in the settings panel.
+On first launch, enter your **API Key** in the settings panel.
 
 > You'll need to grant Screen Recording permission: System Settings → Privacy & Security → Screen Recording.
 

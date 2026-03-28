@@ -58,7 +58,7 @@
 - macOS 14.0+
 - [Node.js](https://nodejs.org/) 18+
 - [Rust](https://www.rust-lang.org/tools/install) 1.70+
-- 豆包同声传译 API 凭证（[免费申请](https://console.volcengine.com/speech/service/10030)）
+- 豆包同声传译 API Key（[免费申请](https://console.volcengine.com/speech/new/experience/translate)）
 
 ### 安装运行
 
@@ -77,7 +77,7 @@ npm run tauri dev
 npm run tauri build
 ```
 
-首次运行时会弹出设置面板，填入从火山引擎获取的 **APP ID** 和 **Access Token** 即可。
+首次运行时会弹出设置面板，填入从火山引擎获取的 **API Key** 即可。
 
 > 首次启动需要授予「屏幕录制」权限（系统设置 → 隐私与安全 → 屏幕录制）。
 
@@ -155,11 +155,11 @@ TransEcho/
 </details>
 
 <details>
-<summary><b>如何获取 API 凭证？</b></summary>
+<summary><b>如何获取 API Key？</b></summary>
 
-1. 访问 [火山引擎控制台](https://console.volcengine.com/speech/service/10030)
+1. 访问 [火山引擎同声传译体验页](https://console.volcengine.com/speech/new/experience/translate)
 2. 开通「同声传译 2.0」服务（新用户免费 100 万 token）
-3. 创建应用，获取 APP ID 和 Access Token
+3. 获取 API Key
 4. 在 TransEcho 设置中填入即可
 </details>
 
