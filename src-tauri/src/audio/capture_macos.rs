@@ -85,13 +85,9 @@ impl SCStreamOutputTrait for AudioCaptureHandler {
 
         // Diagnostic: log audio level every 500 frames
         if count % 500 == 0 {
-            let rms: f32 = (all_samples.iter().map(|s| s * s).sum::<f32>()
-                / all_samples.len() as f32)
-                .sqrt();
-            let max_abs = all_samples
-                .iter()
-                .map(|s| s.abs())
-                .fold(0.0f32, f32::max);
+            let rms: f32 =
+                (all_samples.iter().map(|s| s * s).sum::<f32>() / all_samples.len() as f32).sqrt();
+            let max_abs = all_samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
             info!(
                 "Audio frames captured: {}, samples: {}, rms: {:.6}, max: {:.6}",
                 count,
@@ -124,9 +120,7 @@ pub async fn start_capture(
 
     let content = SCShareableContent::get()?;
     let displays = content.displays();
-    let display = displays
-        .first()
-        .ok_or("No display found")?;
+    let display = displays.first().ok_or("No display found")?;
 
     let filter = SCContentFilter::create()
         .with_display(display)

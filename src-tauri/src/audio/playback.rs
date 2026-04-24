@@ -1,133 +1,27 @@
-use rodio::{OutputStream, Sink, Source};
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::AtomicI64;
 use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
-/// Current time in milliseconds since epoch (for TTS echo suppression timestamps).
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
+use crate::audio::output_router::{OutputConfig, OutputRouter};
+
+#[derive(Debug, Clone)]
+pub struct TtsPlaybackConfig {
+    pub device_name: Option<String>,
+    pub monitor_enabled: bool,
+    pub monitor_device_name: Option<String>,
+    pub volume: f32,
 }
 
-/// A streaming audio source with jitter buffer for smooth TTS playback.
-///
-/// Key design: next() is NEVER blocking. The audio callback thread must not
-/// be starved — if no data is available, we immediately return silence.
-/// A separate pre-buffering phase absorbs initial network jitter.
-struct StreamingSource {
-    rx: std_mpsc::Receiver<Vec<f32>>,
-    buffer: VecDeque<Vec<f32>>,
-    current_chunk: Vec<f32>,
-    pos: usize,
-    sample_rate: u32,
-    initialized: bool,
-    /// Timestamp (ms since epoch) of the last real audio sample played.
-    /// The capture pipeline uses this with a cooldown to suppress loopback echo.
-    last_played_ms: Arc<AtomicI64>,
-}
-
-impl StreamingSource {
-    /// Drain all immediately available chunks into the internal buffer (non-blocking)
-    fn drain_available(&mut self) {
-        while let Ok(chunk) = self.rx.try_recv() {
-            self.buffer.push_back(chunk);
+impl Default for TtsPlaybackConfig {
+    fn default() -> Self {
+        Self {
+            device_name: None,
+            monitor_enabled: false,
+            monitor_device_name: None,
+            volume: 1.0,
         }
-    }
-
-    /// Pre-buffer audio data before starting playback.
-    /// Waits up to 500ms to accumulate ~200ms worth of audio samples.
-    /// This is the ONLY place where blocking is allowed (before playback starts).
-    fn initialize(&mut self) {
-        let deadline = std::time::Instant::now() + Duration::from_millis(500);
-        while std::time::Instant::now() < deadline {
-            match self.rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(chunk) => {
-                    self.buffer.push_back(chunk);
-                    let total_samples: usize = self.buffer.iter().map(|c| c.len()).sum();
-                    if total_samples >= (self.sample_rate as usize / 5) {
-                        break;
-                    }
-                }
-                Err(std_mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        }
-        self.initialized = true;
-        debug!(
-            "TTS jitter buffer initialized with {} chunks ({} samples)",
-            self.buffer.len(),
-            self.buffer.iter().map(|c| c.len()).sum::<usize>()
-        );
-    }
-}
-
-impl Iterator for StreamingSource {
-    type Item = f32;
-
-    fn next(&mut self) -> Option<f32> {
-        // Pre-buffer on first call (blocking allowed here, before playback)
-        if !self.initialized {
-            self.initialize();
-        }
-
-        // Fast path: advance within current chunk
-        if self.pos < self.current_chunk.len() {
-            let sample = self.current_chunk[self.pos];
-            self.pos += 1;
-            return Some(sample);
-        }
-
-        // Current chunk exhausted — eagerly drain all available chunks (non-blocking)
-        self.drain_available();
-
-        // Get next chunk from internal buffer
-        if let Some(chunk) = self.buffer.pop_front() {
-            self.last_played_ms.store(now_ms(), Ordering::Relaxed);
-            self.current_chunk = chunk;
-            self.pos = 1;
-            return Some(self.current_chunk[0]);
-        }
-
-        // Buffer empty — try once more (NON-BLOCKING, never stall the audio thread)
-        match self.rx.try_recv() {
-            Ok(chunk) => {
-                self.last_played_ms.store(now_ms(), Ordering::Relaxed);
-                self.drain_available();
-                self.current_chunk = chunk;
-                self.pos = 1;
-                Some(self.current_chunk[0])
-            }
-            Err(std_mpsc::TryRecvError::Empty) => {
-                // No data available — timestamp naturally expires, capture pipeline
-                // resumes normal audio forwarding after cooldown period.
-                let silence_samples = (self.sample_rate as usize * 10) / 1000;
-                self.current_chunk = vec![0.0; silence_samples];
-                self.pos = 1;
-                Some(0.0)
-            }
-            Err(std_mpsc::TryRecvError::Disconnected) => None,
-        }
-    }
-}
-
-impl Source for StreamingSource {
-    fn current_frame_len(&self) -> Option<usize> {
-        None
-    }
-    fn channels(&self) -> u16 {
-        1
-    }
-    fn sample_rate(&self) -> u32 {
-        self.sample_rate
-    }
-    fn total_duration(&self) -> Option<Duration> {
-        None
     }
 }
 
@@ -147,48 +41,89 @@ impl TtsHandle {
     /// Waits for the audio thread to confirm device initialization before returning,
     /// ensuring the handle is truly ready to play audio.
     pub fn new() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let (tx, rx) = std_mpsc::sync_channel::<Vec<f32>>(50);
+        Self::new_with_config(TtsPlaybackConfig::default())
+    }
+
+    pub fn new_with_output_device(
+        device_name: impl Into<String>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Self::new_with_config(TtsPlaybackConfig {
+            device_name: Some(device_name.into()),
+            monitor_enabled: false,
+            monitor_device_name: None,
+            volume: 1.0,
+        })
+    }
+
+    pub fn new_with_config(
+        config: TtsPlaybackConfig,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let (tx, rx) = std_mpsc::sync_channel::<Vec<f32>>(200);
         let last_played_ms = Arc::new(AtomicI64::new(0));
         let last_played_ms_clone = last_played_ms.clone();
         // Oneshot channel to confirm audio device initialization
         let (ready_tx, ready_rx) = std_mpsc::sync_channel::<Result<(), String>>(1);
 
         std::thread::spawn(move || {
-            let (_stream, stream_handle) = match OutputStream::try_default() {
-                Ok(s) => s,
+            let router = match OutputRouter::new(
+                OutputConfig {
+                    device_name: config.device_name.clone(),
+                    volume: config.volume,
+                    max_buffer_ms: 15_000,
+                },
+                last_played_ms_clone,
+            ) {
+                Ok(router) => router,
                 Err(e) => {
                     let _ = ready_tx.send(Err(format!("Failed to open audio output: {}", e)));
                     return;
                 }
             };
 
-            let sink = match Sink::try_new(&stream_handle) {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = ready_tx.send(Err(format!("Failed to create audio sink: {}", e)));
-                    return;
+            let monitor_router = if config.monitor_enabled {
+                match OutputRouter::new(
+                    OutputConfig {
+                        device_name: config.monitor_device_name.clone(),
+                        volume: config.volume,
+                        max_buffer_ms: 15_000,
+                    },
+                    router.last_played_ms(),
+                ) {
+                    Ok(monitor_router) => Some(monitor_router),
+                    Err(e) => {
+                        let _ = ready_tx
+                            .send(Err(format!("Failed to open monitor output: {}", e)));
+                        return;
+                    }
                 }
+            } else {
+                None
             };
 
-            // Signal ready AFTER both stream and sink are successfully created
             let _ = ready_tx.send(Ok(()));
+            info!(
+                "TTS output thread started: device={}, {}Hz, {}ch",
+                router.device_name(),
+                router.sample_rate(),
+                router.channels()
+            );
+            if let Some(ref monitor_router) = monitor_router {
+                info!(
+                    "TTS local monitor started: device={}, {}Hz, {}ch",
+                    monitor_router.device_name(),
+                    monitor_router.sample_rate(),
+                    monitor_router.channels()
+                );
+            }
 
-            sink.set_volume(1.0);
+            while let Ok(samples) = rx.recv() {
+                router.push_pcm_24k_mono_f32(&samples);
+                if let Some(ref monitor_router) = monitor_router {
+                    monitor_router.push_pcm_24k_mono_f32(&samples);
+                }
+            }
 
-            let source = StreamingSource {
-                rx,
-                buffer: VecDeque::new(),
-                current_chunk: Vec::new(),
-                pos: 0,
-                sample_rate: 24000,
-                initialized: false,
-                last_played_ms: last_played_ms_clone,
-            };
-
-            sink.append(source);
-            info!("TTS player thread started (24kHz mono f32 PCM, jitter buffer enabled)");
-            sink.sleep_until_end();
-            info!("TTS player thread ended");
+            info!("TTS output thread ended");
         });
 
         // Wait for audio thread to confirm device initialization (up to 3 seconds)

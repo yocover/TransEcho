@@ -38,10 +38,7 @@ impl TranslationClient {
     pub async fn connect(
         mut self,
     ) -> Result<
-        (
-            mpsc::Sender<Vec<i16>>,
-            mpsc::Receiver<TranslationEvent>,
-        ),
+        (mpsc::Sender<Vec<i16>>, mpsc::Receiver<TranslationEvent>),
         Box<dyn std::error::Error>,
     > {
         // Build WebSocket request with auth headers
@@ -88,19 +85,17 @@ impl TranslationClient {
                 let msg = time::timeout(WS_READ_TIMEOUT, ws_stream_rx.next()).await;
                 match msg {
                     Ok(Some(Ok(message))) => match message {
-                        Message::Binary(data) => {
-                            match codec::decode_response(&data) {
-                                Ok(event) => {
-                                    debug!("Translation event: {:?}", event);
-                                    if event_tx_clone.send(event).await.is_err() {
-                                        break;
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!("Failed to decode response: {}", e);
+                        Message::Binary(data) => match codec::decode_response(&data) {
+                            Ok(event) => {
+                                debug!("Translation event: {:?}", event);
+                                if event_tx_clone.send(event).await.is_err() {
+                                    break;
                                 }
                             }
-                        }
+                            Err(e) => {
+                                warn!("Failed to decode response: {}", e);
+                            }
+                        },
                         Message::Pong(_) => {
                             debug!("Pong received from server");
                         }

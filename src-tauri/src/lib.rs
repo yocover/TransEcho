@@ -21,8 +21,11 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::default().build())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
+            commands::list_audio_devices,
             commands::start_interpretation,
             commands::stop_interpretation,
+            commands::start_mic_bridge,
+            commands::stop_mic_bridge,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -32,6 +35,11 @@ pub fn run() {
                 let state = app.state::<AppState>();
                 // Send stop signal to clean up SCStream before exit
                 if let Ok(mut guard) = state.stop_tx.try_lock() {
+                    if let Some(tx) = guard.take() {
+                        let _ = tx.try_send(());
+                    }
+                }
+                if let Ok(mut guard) = state.mic_bridge_stop_tx.try_lock() {
                     if let Some(tx) = guard.take() {
                         let _ = tx.try_send(());
                     }
