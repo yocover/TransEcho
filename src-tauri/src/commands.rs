@@ -671,7 +671,7 @@ pub async fn start_mic_bridge(
     correct_words: String,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let tts_playback_speed = tts_playback_speed.clamp(1.0, 1.25);
+    let tts_playback_speed = tts_playback_speed.clamp(1.0, 1.5);
 
     let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
     {

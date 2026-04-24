@@ -11,6 +11,7 @@ mod imp {
 
     use crate::audio::device::find_output_device;
     use crate::audio::output_resample::OutputResampler;
+    use crate::audio::time_stretch::TimeStretchProcessor;
     use crate::audio::types::AudioResult;
 
     fn now_ms() -> i64 {
@@ -41,6 +42,7 @@ mod imp {
 
     pub struct OutputRouter {
         queue: Arc<Mutex<VecDeque<f32>>>,
+        time_stretcher: Mutex<Option<TimeStretchProcessor>>,
         resampler: Mutex<OutputResampler>,
         _stream: cpal::Stream,
         last_played_ms: Arc<AtomicI64>,
@@ -135,17 +137,22 @@ mod imp {
                     / 1000;
 
             info!(
-                "Audio output router started: device={}, {}Hz, {}ch, {:?}",
-                device_name, sample_rate, channels, sample_format
+                "Audio output router started: device={}, {}Hz, {}ch, {:?}, playback_speed={:.2}, preserve_pitch={}",
+                device_name,
+                sample_rate,
+                channels,
+                sample_format,
+                config.playback_speed,
+                config.playback_speed > 1.001
             );
 
             Ok(Self {
                 queue,
-                resampler: Mutex::new(OutputResampler::new(
-                    sample_rate,
-                    channels,
-                    config.playback_speed,
-                )),
+                time_stretcher: Mutex::new(
+                    (config.playback_speed > 1.001)
+                        .then(|| TimeStretchProcessor::new(config.playback_speed)),
+                ),
+                resampler: Mutex::new(OutputResampler::new(sample_rate, channels)),
                 _stream: stream,
                 last_played_ms: callback_last_played_ms,
                 device_name,
@@ -176,9 +183,21 @@ mod imp {
                 return;
             }
 
+            let stretched = {
+                let mut stretcher = self.time_stretcher.lock().unwrap();
+                match stretcher.as_mut() {
+                    Some(processor) => processor.process(samples),
+                    None => samples.to_vec(),
+                }
+            };
+
+            if stretched.is_empty() {
+                return;
+            }
+
             let converted = {
                 let mut resampler = self.resampler.lock().unwrap();
-                resampler.process(samples)
+                resampler.process(&stretched)
             };
 
             if converted.is_empty() {

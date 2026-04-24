@@ -107,6 +107,8 @@
             <option value="1.0">正常 (1.0x)</option>
             <option value="1.1">稍快 (1.1x)</option>
             <option value="1.2">快速 (1.2x)</option>
+            <option value="1.3">更快 (1.3x)</option>
+            <option value="1.5">很快 (1.5x)</option>
           </select>
         </div>
       {/if}

@@ -6,17 +6,15 @@ pub struct OutputResampler {
     input_rate: u32,
     output_rate: u32,
     output_channels: u16,
-    playback_speed: f32,
     last_input_sample: f32,
 }
 
 impl OutputResampler {
-    pub fn new(output_rate: u32, output_channels: u16, playback_speed: f32) -> Self {
+    pub fn new(output_rate: u32, output_channels: u16) -> Self {
         Self {
             input_rate: 24_000,
             output_rate,
             output_channels: output_channels.max(1),
-            playback_speed: playback_speed.clamp(1.0, 1.25),
             last_input_sample: 0.0,
         }
     }
@@ -34,7 +32,7 @@ impl OutputResampler {
             return Vec::new();
         }
 
-        let ratio = self.output_rate as f64 / (self.input_rate as f64 * self.playback_speed as f64);
+        let ratio = self.output_rate as f64 / self.input_rate as f64;
         let output_frames = ((input_mono.len() as f64) * ratio).ceil() as usize;
         let mut output_mono = Vec::with_capacity(output_frames);
 

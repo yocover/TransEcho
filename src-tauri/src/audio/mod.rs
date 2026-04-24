@@ -16,4 +16,6 @@ pub mod output_resample;
 pub mod output_router;
 pub mod playback;
 pub mod resample;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub mod time_stretch;
 pub mod types;
