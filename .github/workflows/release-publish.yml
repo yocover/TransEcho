@@ -34,6 +34,8 @@ jobs:
             exit 1
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          PREVIOUS_TAG=$(git tag --sort=-v:refname | grep '^v' | grep -Fxv "${TAG}" | head -n 1 || true)
+          echo "previous_tag=${PREVIOUS_TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Download artifacts from Build workflow
         env:
@@ -54,17 +56,136 @@ jobs:
       - name: Show downloaded assets
         run: find release-artifacts -type f | sort
 
+      - name: Generate release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release_tag.outputs.tag }}
+          PREVIOUS_TAG: ${{ steps.release_tag.outputs.previous_tag }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import subprocess
+          from pathlib import Path
+
+          repo = os.environ["REPO"]
+          tag = os.environ["TAG"]
+          previous_tag = os.environ.get("PREVIOUS_TAG", "").strip()
+          head_sha = os.environ["HEAD_SHA"]
+
+          def run(*args):
+            return subprocess.check_output(args, text=True).strip()
+
+          if previous_tag:
+            log_range = f"{previous_tag}..{tag}"
+            compare_link = f"https://github.com/{repo}/compare/{previous_tag}...{tag}"
+          else:
+            log_range = tag
+            compare_link = ""
+
+          raw_log = run(
+            "git",
+            "log",
+            "--no-merges",
+            "--pretty=format:%s",
+            log_range,
+          )
+          commits = [line.strip() for line in raw_log.splitlines() if line.strip()]
+
+          def normalize(message: str) -> str:
+            prefixes = [
+              "feat:", "fix:", "perf:", "refactor:", "docs:", "ci:",
+              "chore:", "test:", "build:", "merge:",
+            ]
+            lower = message.lower()
+            for prefix in prefixes:
+              if lower.startswith(prefix):
+                return message[len(prefix):].strip().capitalize()
+            return message[0].upper() + message[1:] if message else message
+
+          sections = {
+            "🚀 Features": [],
+            "🐛 Fixes": [],
+            "⚡ Performance": [],
+            "🧰 CI / Release": [],
+            "📝 Docs": [],
+            "🔧 Maintenance": [],
+            "📦 Other": [],
+          }
+
+          for message in commits:
+            lower = message.lower()
+            normalized = normalize(message)
+            if lower.startswith("feat:"):
+              sections["🚀 Features"].append(normalized)
+            elif lower.startswith("fix:"):
+              sections["🐛 Fixes"].append(normalized)
+            elif lower.startswith("perf:"):
+              sections["⚡ Performance"].append(normalized)
+            elif lower.startswith(("ci:", "build:", "release:")):
+              sections["🧰 CI / Release"].append(normalized)
+            elif lower.startswith("docs:"):
+              sections["📝 Docs"].append(normalized)
+            elif lower.startswith(("chore:", "refactor:", "test:")):
+              sections["🔧 Maintenance"].append(normalized)
+            else:
+              sections["📦 Other"].append(normalized)
+
+          asset_files = sorted(
+            str(p.relative_to(Path("release-artifacts")))
+            for p in Path("release-artifacts").rglob("*")
+            if p.is_file() and p.suffix in {".dmg", ".msi", ".exe"}
+          )
+
+          lines = [f"## What's Changed", ""]
+
+          added_section = False
+          for title, items in sections.items():
+            if not items:
+              continue
+            added_section = True
+            lines.append(f"### {title}")
+            for item in items:
+              lines.append(f"- {item}")
+            lines.append("")
+
+          if not added_section:
+            lines.extend([
+              "### 📦 Maintenance",
+              f"- Release {tag}",
+              "",
+            ])
+
+          if asset_files:
+            lines.append("### 📥 Assets")
+            for asset in asset_files:
+              lines.append(f"- `{asset}`")
+            lines.append("")
+
+          if compare_link:
+            lines.append(f"**Full Changelog**: [{previous_tag}...{tag}]({compare_link})")
+          else:
+            lines.append(f"Release commit: `{head_sha[:7]}`")
+
+          Path("release-notes.md").write_text("\n".join(lines) + "\n")
+          PY
+
+          cat release-notes.md
+
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.release_tag.outputs.tag }}
         run: |
           if gh release view "${TAG}" >/dev/null 2>&1; then
-            echo "Release ${TAG} already exists"
+            gh release edit "${TAG}" \
+              --title "${TAG}" \
+              --notes-file release-notes.md
           else
             gh release create "${TAG}" \
               --title "${TAG}" \
-              --generate-notes
+              --notes-file release-notes.md
           fi
 
       - name: Upload release assets
