@@ -29,6 +29,7 @@
   let sourceLang = $state("zh");
   let targetLang = $state("en");
   let speakerId = $state("zh_female_xiaoai_uranus_bigtts");
+  let ttsPlaybackSpeed = $state("1.1");
   let hotWords = $state("");
   let glossary = $state("");
   let correctWords = $state("");
@@ -144,6 +145,7 @@
       sourceLang = (await store.get<string>("bridge_source_lang")) || "zh";
       targetLang = (await store.get<string>("bridge_target_lang")) || "en";
       speakerId = (await store.get<string>("speaker_id")) || "zh_female_xiaoai_uranus_bigtts";
+      ttsPlaybackSpeed = (await store.get<string>("tts_playback_speed")) || "1.1";
       hotWords = (await store.get<string>("hot_words")) || "";
       glossary = (await store.get<string>("glossary")) || "";
       correctWords = (await store.get<string>("correct_words")) || "";
@@ -165,6 +167,7 @@
       await store.set("bridge_source_lang", sourceLang);
       await store.set("bridge_target_lang", targetLang);
       await store.set("speaker_id", speakerId);
+      await store.set("tts_playback_speed", ttsPlaybackSpeed);
       await store.set("input_device_name", inputDeviceName);
       await store.set("output_device_name", outputDeviceName);
       await store.set("monitor_enabled", monitorEnabled);
@@ -329,6 +332,7 @@
         sourceLanguage: sourceLang,
         targetLanguage: targetLang,
         speakerId,
+        ttsPlaybackSpeed: Number(ttsPlaybackSpeed),
         hotWords: hotWordsList,
         glossary: glossaryMap,
         correctWords: correctWordsJson,

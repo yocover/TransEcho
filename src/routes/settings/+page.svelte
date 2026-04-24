@@ -12,6 +12,7 @@
   let apiKey = $state("");
   let ttsMode = $state<"off" | "preset" | "clone">("preset");
   let speakerId = $state("zh_female_xiaoai_uranus_bigtts");
+  let ttsPlaybackSpeed = $state("1.1");
   let hotWords = $state("");
   let glossary = $state("");
   let correctWords = $state("");
@@ -30,6 +31,7 @@
       apiKey = (await store.get<string>("api_key")) || "";
       ttsMode = (await store.get<string>("tts_mode") as "off" | "preset" | "clone") || "preset";
       speakerId = (await store.get<string>("speaker_id")) || "zh_female_xiaoai_uranus_bigtts";
+      ttsPlaybackSpeed = (await store.get<string>("tts_playback_speed")) || "1.1";
       hotWords = (await store.get<string>("hot_words")) || "";
       glossary = (await store.get<string>("glossary")) || "";
       correctWords = (await store.get<string>("correct_words")) || "";
@@ -43,6 +45,7 @@
       await store.set("api_key", apiKey);
       await store.set("tts_mode", ttsMode);
       await store.set("speaker_id", speakerId);
+      await store.set("tts_playback_speed", ttsPlaybackSpeed);
       await store.set("hot_words", hotWords);
       await store.set("glossary", glossary);
       await store.set("correct_words", correctWords);
@@ -94,6 +97,17 @@
               <button class="voice-chip" class:active={speakerId === v.id} onclick={() => (speakerId = v.id)}>{t(uiLang, v.key)}</button>
             {/each}
           </div>
+        </div>
+      {/if}
+
+      {#if ttsMode !== "off"}
+        <div class="field">
+          <label for="tts-playback-speed">播放语速</label>
+          <select id="tts-playback-speed" bind:value={ttsPlaybackSpeed}>
+            <option value="1.0">正常 (1.0x)</option>
+            <option value="1.1">稍快 (1.1x)</option>
+            <option value="1.2">快速 (1.2x)</option>
+          </select>
         </div>
       {/if}
     {:else}

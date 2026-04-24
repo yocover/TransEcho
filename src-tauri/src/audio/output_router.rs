@@ -24,6 +24,7 @@ mod imp {
     pub struct OutputConfig {
         pub device_name: Option<String>,
         pub volume: f32,
+        pub playback_speed: f32,
         pub max_buffer_ms: u32,
     }
 
@@ -32,6 +33,7 @@ mod imp {
             Self {
                 device_name: None,
                 volume: 1.0,
+                playback_speed: 1.1,
                 max_buffer_ms: 5_000,
             }
         }
@@ -139,7 +141,11 @@ mod imp {
 
             Ok(Self {
                 queue,
-                resampler: Mutex::new(OutputResampler::new(sample_rate, channels)),
+                resampler: Mutex::new(OutputResampler::new(
+                    sample_rate,
+                    channels,
+                    config.playback_speed,
+                )),
                 _stream: stream,
                 last_played_ms: callback_last_played_ms,
                 device_name,

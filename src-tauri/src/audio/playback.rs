@@ -12,6 +12,7 @@ pub struct TtsPlaybackConfig {
     pub monitor_enabled: bool,
     pub monitor_device_name: Option<String>,
     pub volume: f32,
+    pub playback_speed: f32,
 }
 
 impl Default for TtsPlaybackConfig {
@@ -21,6 +22,7 @@ impl Default for TtsPlaybackConfig {
             monitor_enabled: false,
             monitor_device_name: None,
             volume: 1.0,
+            playback_speed: 1.1,
         }
     }
 }
@@ -52,6 +54,7 @@ impl TtsHandle {
             monitor_enabled: false,
             monitor_device_name: None,
             volume: 1.0,
+            playback_speed: 1.1,
         })
     }
 
@@ -69,6 +72,7 @@ impl TtsHandle {
                 OutputConfig {
                     device_name: config.device_name.clone(),
                     volume: config.volume,
+                    playback_speed: config.playback_speed,
                     max_buffer_ms: 15_000,
                 },
                 last_played_ms_clone,
@@ -85,6 +89,7 @@ impl TtsHandle {
                     OutputConfig {
                         device_name: config.monitor_device_name.clone(),
                         volume: config.volume,
+                        playback_speed: config.playback_speed,
                         max_buffer_ms: 15_000,
                     },
                     router.last_played_ms(),

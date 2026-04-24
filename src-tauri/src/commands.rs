@@ -665,11 +665,13 @@ pub async fn start_mic_bridge(
     source_language: String,
     target_language: String,
     speaker_id: String,
+    tts_playback_speed: f32,
     hot_words: Vec<String>,
     glossary: HashMap<String, String>,
     correct_words: String,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
+    let tts_playback_speed = tts_playback_speed.clamp(1.0, 1.25);
 
     let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
     {
@@ -777,6 +779,7 @@ pub async fn start_mic_bridge(
         monitor_enabled: enable_monitor,
         monitor_device_name: normalized_monitor_device_name.clone(),
         volume: 1.0,
+        playback_speed: tts_playback_speed,
     });
     let tts_player = match tts_player_result {
         Ok(player) => player,
