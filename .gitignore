@@ -27,3 +27,7 @@ src-tauri/gen/
 # Claude Code
 .context/
 .gstack/
+
+# Local temp
+/tmp/
+tmp/
