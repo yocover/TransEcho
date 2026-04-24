@@ -1,0 +1,80 @@
+name: Release Publish
+
+on:
+  workflow_run:
+    workflows: ["Build"]
+    types:
+      - completed
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish-release:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Resolve release tag
+        id: release_tag
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          git fetch --force --tags origin
+          TAG=$(git tag --points-at "${HEAD_SHA}" | grep '^v' | head -n 1)
+          if [ -z "${TAG}" ]; then
+            echo "No version tag found for commit ${HEAD_SHA}"
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Download artifacts from Build workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          mkdir -p release-artifacts
+          gh api "repos/${REPO}/actions/runs/${RUN_ID}/artifacts" \
+            --paginate \
+            --jq '.artifacts[] | [.id, .name] | @tsv' |
+          while IFS=$'\t' read -r artifact_id artifact_name; do
+            echo "Downloading artifact ${artifact_name} (${artifact_id})"
+            gh api "repos/${REPO}/actions/artifacts/${artifact_id}/zip" > "${artifact_name}.zip"
+            unzip -o "${artifact_name}.zip" -d "release-artifacts/${artifact_name}"
+          done
+
+      - name: Show downloaded assets
+        run: find release-artifacts -type f | sort
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release_tag.outputs.tag }}
+        run: |
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists"
+          else
+            gh release create "${TAG}" \
+              --title "${TAG}" \
+              --generate-notes
+          fi
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release_tag.outputs.tag }}
+        run: |
+          mapfile -t files < <(find release-artifacts -type f \( -name '*.dmg' -o -name '*.msi' -o -name '*.exe' \) | sort)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No release assets found"
+            exit 1
+          fi
+          gh release upload "${TAG}" "${files[@]}" --clobber

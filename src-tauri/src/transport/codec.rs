@@ -14,13 +14,13 @@ pub struct SessionConfig {
     pub resource_id: String,
     pub connection_id: String,
     pub session_id: String,
-    pub mode: String,           // "s2t" or "s2s"
+    pub mode: String,            // "s2t" or "s2s"
     pub source_language: String, // "en", "ja", "zh", etc.
     pub target_language: String,
-    pub speaker_id: String,     // TTS voice, empty string = clone input speaker
+    pub speaker_id: String, // TTS voice, empty string = clone input speaker
     pub hot_words: Vec<String>,
     pub glossary: HashMap<String, String>,
-    pub correct_words: String,  // JSON string: {"original":"replacement",...}
+    pub correct_words: String, // JSON string: {"original":"replacement",...}
 }
 
 /// Encode a StartSession request
@@ -232,14 +232,39 @@ pub fn encode_update_config(config: &SessionConfig, sequence: i32) -> Vec<u8> {
 pub enum TranslationEvent {
     SessionStarted,
     SessionFinished,
-    SessionFailed { message: String },
-    SourceSubtitle { text: String, is_final: bool, start_time: i32, end_time: i32, spk_chg: bool },
-    TranslationSubtitle { text: String, is_final: bool, start_time: i32, end_time: i32, spk_chg: bool },
-    TtsAudio { data: Vec<u8> },
+    SessionFailed {
+        message: String,
+    },
+    SourceSubtitle {
+        text: String,
+        is_final: bool,
+        start_time: i32,
+        end_time: i32,
+        spk_chg: bool,
+    },
+    TranslationSubtitle {
+        text: String,
+        is_final: bool,
+        start_time: i32,
+        end_time: i32,
+        spk_chg: bool,
+    },
+    TtsAudio {
+        data: Vec<u8>,
+    },
     TtsSentenceEnd,
-    Usage { input_audio_tokens: f64, output_text_tokens: f64, output_audio_tokens: f64, duration_ms: i64 },
-    AudioMuted { duration_ms: i32 },
-    Unknown { event: i32 },
+    Usage {
+        input_audio_tokens: f64,
+        output_text_tokens: f64,
+        output_audio_tokens: f64,
+        duration_ms: i64,
+    },
+    AudioMuted {
+        duration_ms: i32,
+    },
+    Unknown {
+        event: i32,
+    },
 }
 
 /// Decode a server response
@@ -254,10 +279,7 @@ pub fn decode_response(data: &[u8]) -> Result<TranslationEvent, prost::DecodeErr
     if let Some(ref meta) = resp.response_meta {
         if meta.status_code != 0 && meta.status_code != 20000000 {
             return Ok(TranslationEvent::SessionFailed {
-                message: format!(
-                    "Status {}: {}",
-                    meta.status_code, meta.message
-                ),
+                message: format!("Status {}: {}", meta.status_code, meta.message),
             });
         }
     }
@@ -266,10 +288,7 @@ pub fn decode_response(data: &[u8]) -> Result<TranslationEvent, prost::DecodeErr
         EventType::SessionStarted => TranslationEvent::SessionStarted,
         EventType::SessionFinished => TranslationEvent::SessionFinished,
         EventType::SessionFailed => TranslationEvent::SessionFailed {
-            message: resp
-                .response_meta
-                .map(|m| m.message)
-                .unwrap_or_default(),
+            message: resp.response_meta.map(|m| m.message).unwrap_or_default(),
         },
         EventType::SourceSubtitleStart | EventType::SourceSubtitleResponse => {
             TranslationEvent::SourceSubtitle {
@@ -326,13 +345,11 @@ pub fn decode_response(data: &[u8]) -> Result<TranslationEvent, prost::DecodeErr
                 output_audio_tokens: output_audio,
                 duration_ms: duration,
             }
-        },
+        }
         EventType::AudioMuted => TranslationEvent::AudioMuted {
             duration_ms: resp.muted_duration_ms,
         },
-        _ => TranslationEvent::Unknown {
-            event: resp.event,
-        },
+        _ => TranslationEvent::Unknown { event: resp.event },
     };
 
     Ok(result)
@@ -340,9 +357,9 @@ pub fn decode_response(data: &[u8]) -> Result<TranslationEvent, prost::DecodeErr
 
 #[cfg(test)]
 mod tests {
+    use super::super::proto::common::ResponseMeta;
     use super::*;
     use std::collections::HashMap;
-    use super::super::proto::common::ResponseMeta;
 
     fn test_config() -> SessionConfig {
         SessionConfig {

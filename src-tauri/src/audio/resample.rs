@@ -10,7 +10,10 @@ pub struct AudioResampler {
 
 impl AudioResampler {
     /// Create a new resampler from source_rate/channels to 16kHz mono
-    pub fn new(source_rate: u32, source_channels: u16) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn new(
+        source_rate: u32,
+        source_channels: u16,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let chunk_size = (source_rate as usize * 80) / 1000; // 80ms worth of samples
         let resampler = FftFixedIn::new(
             source_rate as usize,
@@ -55,7 +58,10 @@ impl AudioResampler {
         let mut mono = Vec::with_capacity(len);
 
         for i in 0..len {
-            let sum: f32 = channels.iter().map(|ch| ch.get(i).copied().unwrap_or(0.0)).sum();
+            let sum: f32 = channels
+                .iter()
+                .map(|ch| ch.get(i).copied().unwrap_or(0.0))
+                .sum();
             mono.push(sum / num_channels);
         }
 
@@ -64,7 +70,10 @@ impl AudioResampler {
 
     /// Resample a batch of interleaved f32 audio samples to 16kHz mono
     /// Returns 16-bit PCM samples (i16) ready for the Doubao API
-    pub fn process(&mut self, interleaved_samples: &[f32]) -> Result<Vec<i16>, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn process(
+        &mut self,
+        interleaved_samples: &[f32],
+    ) -> Result<Vec<i16>, Box<dyn std::error::Error + Send + Sync>> {
         let channels = self.deinterleave(interleaved_samples);
 
         // Pad to chunk size if needed

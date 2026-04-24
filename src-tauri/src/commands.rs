@@ -10,8 +10,11 @@ use tokio::time::{timeout, Duration};
 use tracing::{debug, error, info, warn};
 
 use crate::audio::capture;
-use crate::audio::playback::{self, TtsHandle};
+use crate::audio::capture_input::{start_input_capture, InputCaptureOptions};
+use crate::audio::device as audio_device;
+use crate::audio::playback::{self, TtsHandle, TtsPlaybackConfig};
 use crate::audio::resample::AudioResampler;
+use crate::audio::types::AudioDeviceList;
 use crate::transport::client::TranslationClient;
 use crate::transport::codec::{SessionConfig, TranslationEvent};
 
@@ -20,26 +23,41 @@ use crate::transport::codec::{SessionConfig, TranslationEvent};
 #[serde(tag = "type")]
 pub enum SubtitleEvent {
     #[serde(rename = "source")]
-    Source { text: String, is_final: bool, spk_chg: bool },
+    Source {
+        text: String,
+        is_final: bool,
+        spk_chg: bool,
+    },
     #[serde(rename = "translation")]
-    Translation { text: String, is_final: bool, spk_chg: bool },
+    Translation {
+        text: String,
+        is_final: bool,
+        spk_chg: bool,
+    },
     #[serde(rename = "status")]
     Status { message: String },
     #[serde(rename = "error")]
     Error { message: String },
     #[serde(rename = "usage")]
-    Usage { input_audio_tokens: f64, output_text_tokens: f64, output_audio_tokens: f64, duration_ms: i64 },
+    Usage {
+        input_audio_tokens: f64,
+        output_text_tokens: f64,
+        output_audio_tokens: f64,
+        duration_ms: i64,
+    },
 }
 
 /// App state to track running session
 pub struct AppState {
     pub stop_tx: Mutex<Option<mpsc::Sender<()>>>,
+    pub mic_bridge_stop_tx: Mutex<Option<mpsc::Sender<()>>>,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
             stop_tx: Mutex::new(None),
+            mic_bridge_stop_tx: Mutex::new(None),
         }
     }
 }
@@ -48,20 +66,68 @@ impl Default for AppState {
 /// Without this, a panic would leave stop_tx set, causing "Already running" forever.
 struct CleanupGuard {
     app_handle: AppHandle,
+    mode: SessionMode,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SessionMode {
+    Interpretation,
+    MicBridge,
+}
+
+fn should_enable_mic_bridge_echo_suppression(
+    enable_monitor: bool,
+    input_device_name: &str,
+    monitor_device_name: Option<&str>,
+) -> bool {
+    if !enable_monitor {
+        return false;
+    }
+
+    let Some(monitor_device_name) = monitor_device_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    else {
+        return false;
+    };
+
+    let input = input_device_name.to_lowercase();
+    let monitor = monitor_device_name.to_lowercase();
+    let monitor_is_open_speaker = monitor.contains("speaker")
+        || monitor.contains("扬声器")
+        || monitor.contains("built-in output");
+
+    monitor_is_open_speaker
+        || ((input.contains("macbook") || input.contains("built-in microphone") || input.contains("麦克风"))
+            && (monitor.contains("macbook") || monitor.contains("built-in output")))
 }
 
 impl Drop for CleanupGuard {
     fn drop(&mut self) {
         let app = self.app_handle.clone();
+        let mode = self.mode;
         // Schedule async cleanup on the tokio runtime.
         // try_current() may fail during app shutdown — that's OK since
         // the app is exiting anyway.
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                *app.state::<AppState>().stop_tx.lock().await = None;
+                let state = app.state::<AppState>();
+                match mode {
+                    SessionMode::Interpretation => {
+                        *state.stop_tx.lock().await = None;
+                    }
+                    SessionMode::MicBridge => {
+                        *state.mic_bridge_stop_tx.lock().await = None;
+                    }
+                }
             });
         }
     }
+}
+
+#[tauri::command]
+pub async fn list_audio_devices() -> Result<AudioDeviceList, String> {
+    audio_device::list_audio_devices().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -219,6 +285,7 @@ pub async fn start_interpretation(
     tokio::spawn(async move {
         let _cleanup = CleanupGuard {
             app_handle: app_handle.clone(),
+            mode: SessionMode::Interpretation,
         };
 
         // API connection state (Option allows disconnect/reconnect)
@@ -463,10 +530,14 @@ pub async fn start_interpretation(
                     api_connected = false;
                     audio_buffer.clear();
                     if need_auto_pause {
-                        info!("Auto-pause: 60s sustained silence, disconnecting API to save tokens");
-                        on_sub.send(SubtitleEvent::Status {
-                            message: "auto_paused".to_string(),
-                        }).ok();
+                        info!(
+                            "Auto-pause: 60s sustained silence, disconnecting API to save tokens"
+                        );
+                        on_sub
+                            .send(SubtitleEvent::Status {
+                                message: "auto_paused".to_string(),
+                            })
+                            .ok();
                     } else {
                         info!("API send failed, entering disconnected mode");
                     }
@@ -576,6 +647,368 @@ pub async fn start_interpretation(
 pub async fn stop_interpretation(app: AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let mut stop_tx = state.stop_tx.lock().await;
+    if let Some(tx) = stop_tx.take() {
+        tx.send(()).await.map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn start_mic_bridge(
+    app: AppHandle,
+    on_subtitle: Channel<SubtitleEvent>,
+    api_key: String,
+    input_device_name: String,
+    output_device_name: String,
+    enable_monitor: bool,
+    monitor_device_name: Option<String>,
+    source_language: String,
+    target_language: String,
+    speaker_id: String,
+    tts_playback_speed: f32,
+    hot_words: Vec<String>,
+    glossary: HashMap<String, String>,
+    correct_words: String,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let tts_playback_speed = tts_playback_speed.clamp(1.0, 1.5);
+
+    let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
+    {
+        let mut guard = state.mic_bridge_stop_tx.lock().await;
+        if guard.is_some() {
+            return Err("Mic bridge already running".to_string());
+        }
+        *guard = Some(stop_tx);
+    }
+
+    on_subtitle
+        .send(SubtitleEvent::Status {
+            message: "connecting".to_string(),
+        })
+        .ok();
+
+    let config = SessionConfig {
+        api_key,
+        resource_id: "volc.service_type.10053".to_string(),
+        connection_id: uuid::Uuid::new_v4().to_string(),
+        session_id: uuid::Uuid::new_v4().to_string(),
+        mode: "s2s".to_string(),
+        source_language,
+        target_language,
+        speaker_id,
+        hot_words,
+        glossary,
+        correct_words,
+    };
+
+    let client = TranslationClient::new(config);
+    let connect_result = client.connect().await.map_err(|e| e.to_string());
+    let (audio_tx, mut event_rx) = match connect_result {
+        Ok(v) => v,
+        Err(err_msg) => {
+            *state.mic_bridge_stop_tx.lock().await = None;
+            return Err(err_msg);
+        }
+    };
+
+    match timeout(Duration::from_secs(10), event_rx.recv()).await {
+        Err(_) => {
+            *state.mic_bridge_stop_tx.lock().await = None;
+            return Err("timeout".to_string());
+        }
+        Ok(response) => match response {
+            Some(TranslationEvent::SessionStarted) => {
+                on_subtitle
+                    .send(SubtitleEvent::Status {
+                        message: "connected_tts".to_string(),
+                    })
+                    .ok();
+            }
+            Some(TranslationEvent::SessionFailed { message }) => {
+                *state.mic_bridge_stop_tx.lock().await = None;
+                return Err(format!("api_failed:{}", message));
+            }
+            _ => {
+                *state.mic_bridge_stop_tx.lock().await = None;
+                return Err("unexpected_response".to_string());
+            }
+        },
+    }
+
+    let input_capture_result = start_input_capture(
+        50,
+        InputCaptureOptions {
+            device_name: if input_device_name.trim().is_empty() {
+                None
+            } else {
+                Some(input_device_name.clone())
+            },
+        },
+    )
+    .await
+    .map_err(|e| e.to_string());
+
+    let (mut audio_rx, input_capture_handle) = match input_capture_result {
+        Ok(v) => v,
+        Err(err_msg) => {
+            *state.mic_bridge_stop_tx.lock().await = None;
+            return Err(err_msg);
+        }
+    };
+
+    let normalized_monitor_device_name = monitor_device_name.and_then(|name| {
+        let trimmed = name.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+    let echo_suppression_enabled = should_enable_mic_bridge_echo_suppression(
+        enable_monitor,
+        &input_device_name,
+        normalized_monitor_device_name.as_deref(),
+    );
+    let tts_player_result = TtsHandle::new_with_config(TtsPlaybackConfig {
+        device_name: if output_device_name.trim().is_empty() {
+            None
+        } else {
+            Some(output_device_name.clone())
+        },
+        monitor_enabled: enable_monitor,
+        monitor_device_name: normalized_monitor_device_name.clone(),
+        volume: 1.0,
+        playback_speed: tts_playback_speed,
+    });
+    let tts_player = match tts_player_result {
+        Ok(player) => player,
+        Err(e) => {
+            input_capture_handle.stop().ok();
+            *state.mic_bridge_stop_tx.lock().await = None;
+            return Err(e.to_string());
+        }
+    };
+    let echo_suppression = tts_player.last_played_ms();
+
+    on_subtitle
+        .send(SubtitleEvent::Status {
+            message: "started".to_string(),
+        })
+        .ok();
+
+    let on_sub = on_subtitle.clone();
+    let app_handle = app.clone();
+    tokio::spawn(async move {
+        let _cleanup = CleanupGuard {
+            app_handle: app_handle.clone(),
+            mode: SessionMode::MicBridge,
+        };
+
+        let mut audio_tx = Some(audio_tx);
+        let mut resampler: Option<AudioResampler> = None;
+        let mut chunk_size_interleaved: usize = 0;
+        let mut audio_buffer: Vec<f32> = Vec::new();
+        const ECHO_COOLDOWN_MS: i64 = 120;
+        let mut recent_sources: VecDeque<String> = VecDeque::with_capacity(16);
+        let mut recent_translations: VecDeque<String> = VecDeque::with_capacity(16);
+        const DEDUP_WINDOW: usize = 15;
+
+        let is_duplicate = |text: &str, recent: &VecDeque<String>| -> bool {
+            if recent.iter().any(|r| r == text) {
+                return true;
+            }
+            if recent.len() >= 2 {
+                for start in 0..recent.len() {
+                    let mut concat = String::new();
+                    for i in start..recent.len() {
+                        concat.push_str(&recent[i]);
+                        if concat.len() > text.len() {
+                            break;
+                        }
+                        if concat == text && i > start {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        };
+
+        loop {
+            tokio::select! {
+                frame_opt = audio_rx.recv() => {
+                    match frame_opt {
+                        Some(frame) => {
+                            if resampler.is_none() {
+                                match AudioResampler::new(frame.sample_rate, frame.channels) {
+                                    Ok(r) => {
+                                        chunk_size_interleaved = r.input_frames_next() * frame.channels as usize;
+                                        audio_buffer.reserve(chunk_size_interleaved * 2);
+                                        info!(
+                                            "Mic bridge input resampler initialized: {}Hz {}ch -> 16k mono, chunk_size={}",
+                                            frame.sample_rate,
+                                            frame.channels,
+                                            chunk_size_interleaved
+                                        );
+                                        resampler = Some(r);
+                                    }
+                                    Err(e) => {
+                                        error!("Mic bridge resampler error: {}", e);
+                                        on_sub.send(SubtitleEvent::Error {
+                                            message: format!("resample_failed:{}", e),
+                                        }).ok();
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if let Some(resampler) = resampler.as_mut() {
+                                let tts_active = if echo_suppression_enabled {
+                                    let last_tts = echo_suppression.load(Ordering::Relaxed);
+                                    let now = SystemTime::now()
+                                        .duration_since(UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_millis() as i64;
+                                    last_tts > 0 && (now - last_tts) < ECHO_COOLDOWN_MS
+                                } else {
+                                    false
+                                };
+
+                                if tts_active {
+                                    audio_buffer.extend(std::iter::repeat(0.0f32).take(frame.samples.len()));
+                                } else {
+                                    audio_buffer.extend_from_slice(&frame.samples);
+                                }
+                                while audio_buffer.len() >= chunk_size_interleaved {
+                                    let chunk: Vec<f32> = audio_buffer.drain(..chunk_size_interleaved).collect();
+                                    match resampler.process(&chunk) {
+                                        Ok(pcm16) => {
+                                            if let Some(ref tx) = audio_tx {
+                                                let mut offset = 0;
+                                                while offset < pcm16.len() {
+                                                    let end = (offset + 1280).min(pcm16.len());
+                                                    if tx.send(pcm16[offset..end].to_vec()).await.is_err() {
+                                                        on_sub.send(SubtitleEvent::Error {
+                                                            message: "disconnected".to_string(),
+                                                        }).ok();
+                                                        audio_tx = None;
+                                                        break;
+                                                    }
+                                                    offset = end;
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            warn!("Mic bridge resample failed: {}", e);
+                                        }
+                                    }
+
+                                    if audio_tx.is_none() {
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if audio_tx.is_none() {
+                                break;
+                            }
+                        }
+                        None => {
+                            on_sub.send(SubtitleEvent::Error {
+                                message: "input_capture_ended".to_string(),
+                            }).ok();
+                            break;
+                        }
+                    }
+                }
+                event = event_rx.recv() => {
+                    match event {
+                        Some(TranslationEvent::SourceSubtitle { text, is_final, spk_chg, .. }) => {
+                            if !text.is_empty() {
+                                if is_final {
+                                    if is_duplicate(&text, &recent_sources) {
+                                        debug!("Skipping duplicate mic-bridge source: {}", text);
+                                    } else {
+                                        recent_sources.push_back(text.clone());
+                                        if recent_sources.len() > DEDUP_WINDOW {
+                                            recent_sources.pop_front();
+                                        }
+                                        on_sub.send(SubtitleEvent::Source { text, is_final, spk_chg }).ok();
+                                    }
+                                } else {
+                                    on_sub.send(SubtitleEvent::Source { text, is_final, spk_chg }).ok();
+                                }
+                            }
+                        }
+                        Some(TranslationEvent::TranslationSubtitle { text, is_final, spk_chg, .. }) => {
+                            if !text.is_empty() {
+                                if is_final {
+                                    if is_duplicate(&text, &recent_translations) {
+                                        debug!("Skipping duplicate mic-bridge translation: {}", text);
+                                    } else {
+                                        recent_translations.push_back(text.clone());
+                                        if recent_translations.len() > DEDUP_WINDOW {
+                                            recent_translations.pop_front();
+                                        }
+                                        on_sub.send(SubtitleEvent::Translation { text, is_final, spk_chg }).ok();
+                                    }
+                                } else {
+                                    on_sub.send(SubtitleEvent::Translation { text, is_final, spk_chg }).ok();
+                                }
+                            }
+                        }
+                        Some(TranslationEvent::Usage { input_audio_tokens, output_text_tokens, output_audio_tokens, duration_ms }) => {
+                            on_sub.send(SubtitleEvent::Usage {
+                                input_audio_tokens,
+                                output_text_tokens,
+                                output_audio_tokens,
+                                duration_ms,
+                            }).ok();
+                        }
+                        Some(TranslationEvent::TtsAudio { data }) => {
+                            tts_player.play_pcm_bytes(&data);
+                        }
+                        Some(TranslationEvent::SessionFailed { message }) => {
+                            on_sub.send(SubtitleEvent::Error { message }).ok();
+                            break;
+                        }
+                        Some(TranslationEvent::SessionFinished) => {
+                            on_sub.send(SubtitleEvent::Status { message: "session_ended".to_string() }).ok();
+                            break;
+                        }
+                        None => {
+                            on_sub.send(SubtitleEvent::Error { message: "disconnected".to_string() }).ok();
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                _ = stop_rx.recv() => {
+                    info!("Mic bridge stop signal received");
+                    on_sub.send(SubtitleEvent::Status { message: "stopped".to_string() }).ok();
+                    break;
+                }
+            }
+        }
+
+        drop(audio_tx);
+        drop(tts_player);
+        input_capture_handle.stop().ok();
+        *app_handle
+            .state::<AppState>()
+            .mic_bridge_stop_tx
+            .lock()
+            .await = None;
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn stop_mic_bridge(app: AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let mut stop_tx = state.mic_bridge_stop_tx.lock().await;
     if let Some(tx) = stop_tx.take() {
         tx.send(()).await.map_err(|e| e.to_string())?;
     }

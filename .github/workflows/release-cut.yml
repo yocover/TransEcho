@@ -1,0 +1,86 @@
+name: Release Cut
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (example: 0.2.1)"
+        required: true
+      branch:
+        description: "Branch to release from"
+        required: true
+        default: "mic-bridge"
+
+permissions:
+  contents: write
+
+jobs:
+  cut-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Update version files
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import re
+
+          version = os.environ["VERSION"]
+
+          package_json = pathlib.Path("package.json")
+          package_data = json.loads(package_json.read_text())
+          package_data["version"] = version
+          package_json.write_text(json.dumps(package_data, indent=2) + "\n")
+
+          tauri_conf = pathlib.Path("src-tauri/tauri.conf.json")
+          tauri_data = json.loads(tauri_conf.read_text())
+          tauri_data["version"] = version
+          tauri_conf.write_text(json.dumps(tauri_data, indent=2) + "\n")
+
+          cargo_toml = pathlib.Path("src-tauri/Cargo.toml")
+          cargo_text = cargo_toml.read_text()
+          cargo_text = re.sub(
+              r'(?m)^version = ".*?"$',
+              f'version = "{version}"',
+              cargo_text,
+              count=1,
+          )
+          cargo_toml.write_text(cargo_text)
+          PY
+
+      - name: Commit version bump
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json
+          git commit -m "chore: bump version to ${VERSION}"
+
+      - name: Create release tag
+        env:
+          VERSION: ${{ inputs.version }}
+        run: git tag "v${VERSION}"
+
+      - name: Push branch and tag
+        env:
+          BRANCH: ${{ inputs.branch }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          git push origin "HEAD:${BRANCH}"
+          git push origin "v${VERSION}"
