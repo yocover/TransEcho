@@ -9,7 +9,7 @@ on:
       branch:
         description: "Branch to release from"
         required: true
-        default: "mic-bridge"
+        default: "main"
 
 permissions:
   contents: write
@@ -24,6 +24,7 @@ jobs:
         with:
           ref: ${{ inputs.branch }}
           fetch-depth: 0
+          token: ${{ secrets.RELEASE_PAT }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -64,23 +65,42 @@ jobs:
           PY
 
       - name: Commit version bump
+        id: commit_version
         env:
           VERSION: ${{ inputs.version }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json
-          git commit -m "chore: bump version to ${VERSION}"
+          if git diff --cached --quiet; then
+            echo "No version changes to commit"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "chore: bump version to ${VERSION}"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Create release tag
         env:
           VERSION: ${{ inputs.version }}
-        run: git tag "v${VERSION}"
+        run: |
+          git fetch --force --tags origin
+          if git rev-parse "v${VERSION}" >/dev/null 2>&1 || git ls-remote --tags origin "refs/tags/v${VERSION}" | grep -q .; then
+            echo "Tag v${VERSION} already exists"
+            exit 1
+          fi
+          git tag "v${VERSION}"
 
       - name: Push branch and tag
         env:
           BRANCH: ${{ inputs.branch }}
           VERSION: ${{ inputs.version }}
+          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
         run: |
+          git remote set-url origin "https://x-access-token:${RELEASE_PAT}@github.com/${{ github.repository }}.git"
+          if [ "${{ steps.commit_version.outputs.changed }}" = "true" ]; then
           git push origin "HEAD:${BRANCH}"
+          else
+            echo "Skipping branch push because there was no version change commit"
+          fi
           git push origin "v${VERSION}"
