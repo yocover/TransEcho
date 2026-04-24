@@ -96,8 +96,7 @@ impl TtsHandle {
                 ) {
                     Ok(monitor_router) => Some(monitor_router),
                     Err(e) => {
-                        let _ = ready_tx
-                            .send(Err(format!("Failed to open monitor output: {}", e)));
+                        let _ = ready_tx.send(Err(format!("Failed to open monitor output: {}", e)));
                         return;
                     }
                 }
@@ -126,6 +125,11 @@ impl TtsHandle {
                 if let Some(ref monitor_router) = monitor_router {
                     monitor_router.push_pcm_24k_mono_f32(&samples);
                 }
+            }
+
+            router.flush();
+            if let Some(ref monitor_router) = monitor_router {
+                monitor_router.flush();
             }
 
             info!("TTS output thread ended");

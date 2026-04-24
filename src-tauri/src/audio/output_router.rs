@@ -136,22 +136,27 @@ mod imp {
                 ((sample_rate as usize) * (channels as usize) * (config.max_buffer_ms as usize))
                     / 1000;
 
+            let time_stretcher = (config.playback_speed > 1.001)
+                .then(|| TimeStretchProcessor::new(config.playback_speed));
+            let stretch_backend = time_stretcher
+                .as_ref()
+                .map(|processor| processor.backend_name())
+                .unwrap_or("bypass");
+
             info!(
-                "Audio output router started: device={}, {}Hz, {}ch, {:?}, playback_speed={:.2}, preserve_pitch={}",
+                "Audio output router started: device={}, {}Hz, {}ch, {:?}, playback_speed={:.2}, preserve_pitch={}, stretch_backend={}",
                 device_name,
                 sample_rate,
                 channels,
                 sample_format,
                 config.playback_speed,
-                config.playback_speed > 1.001
+                config.playback_speed > 1.001,
+                stretch_backend
             );
 
             Ok(Self {
                 queue,
-                time_stretcher: Mutex::new(
-                    (config.playback_speed > 1.001)
-                        .then(|| TimeStretchProcessor::new(config.playback_speed)),
-                ),
+                time_stretcher: Mutex::new(time_stretcher),
                 resampler: Mutex::new(OutputResampler::new(sample_rate, channels)),
                 _stream: stream,
                 last_played_ms: callback_last_played_ms,
@@ -219,6 +224,45 @@ mod imp {
                     "Audio output buffer overflow, keeping current playback and truncating incoming chunk by {} samples",
                     converted.len() - available
                 );
+                queue.extend(converted.into_iter().take(available));
+            } else {
+                queue.extend(converted);
+            }
+        }
+
+        pub fn flush(&self) {
+            let stretched = {
+                let mut stretcher = self.time_stretcher.lock().unwrap();
+                match stretcher.as_mut() {
+                    Some(processor) => processor.flush(),
+                    None => Vec::new(),
+                }
+            };
+
+            if stretched.is_empty() {
+                return;
+            }
+
+            let converted = {
+                let mut resampler = self.resampler.lock().unwrap();
+                resampler.process(&stretched)
+            };
+
+            if converted.is_empty() {
+                return;
+            }
+
+            let mut queue = self.queue.lock().unwrap();
+            let available = self.max_buffer_samples.saturating_sub(queue.len());
+            if available == 0 {
+                debug!(
+                    "Audio output buffer full during flush, dropping {} samples",
+                    converted.len()
+                );
+                return;
+            }
+
+            if converted.len() > available {
                 queue.extend(converted.into_iter().take(available));
             } else {
                 queue.extend(converted);
@@ -314,6 +358,8 @@ mod imp {
         }
 
         pub fn push_pcm_24k_mono_f32(&self, _samples: &[f32]) {}
+
+        pub fn flush(&self) {}
     }
 }
 

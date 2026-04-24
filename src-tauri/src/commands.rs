@@ -98,7 +98,9 @@ fn should_enable_mic_bridge_echo_suppression(
         || monitor.contains("built-in output");
 
     monitor_is_open_speaker
-        || ((input.contains("macbook") || input.contains("built-in microphone") || input.contains("麦克风"))
+        || ((input.contains("macbook")
+            || input.contains("built-in microphone")
+            || input.contains("麦克风"))
             && (monitor.contains("macbook") || monitor.contains("built-in output")))
 }
 

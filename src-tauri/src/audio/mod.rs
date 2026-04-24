@@ -18,4 +18,10 @@ pub mod playback;
 pub mod resample;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub mod time_stretch;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub mod time_stretch_backend;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub mod time_stretch_soundtouch;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub mod time_stretch_wsola;
 pub mod types;
